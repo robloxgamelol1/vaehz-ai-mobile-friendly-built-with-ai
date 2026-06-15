@@ -1,0 +1,496 @@
+-- ================================================================
+--  Mobile Autofarm — touch-first UI, no external library needed
+--  Drop-in replacement. Works on PC and mobile.
+-- ================================================================
+
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser      = game:GetService("VirtualUser")
+
+local plr  = Players.LocalPlayer
+local pGui = plr.PlayerGui
+
+-- ── Find tycoon ──────────────────────────────────────────────────
+local tycoon
+for _, v in pairs(workspace:GetChildren()) do
+    if v.Name:find("Tycoon") and v:FindFirstChild("Owner") and v.Owner.Value == plr then
+        tycoon = v; break
+    end
+end
+if not tycoon then warn("[Autofarm] Tycoon not found."); return end
+
+-- ── Number decoder ───────────────────────────────────────────────
+local SFX = {K=1e3,M=1e6,B=1e9,T=1e12,Qd=1e15,Qn=1e18,
+             Sx=1e21,Sxd=1e21,Sp=1e24,Oc=1e27,No=1e30,Dc=1e33}
+local function dec(s)
+    if not s then return nil end
+    local clean = tostring(s):gsub("[\226\128\128-\226\128\143]","")
+    local n, sfx = clean:match("%$([%d%,%.]+)(%a*)")
+    if not n then return nil end
+    n = tonumber(n:gsub(",",""))
+    if sfx == "" then return n end
+    local m = SFX[sfx] or SFX[sfx:sub(1,1):upper()..sfx:sub(2):lower()]
+    return m and n*m or n
+end
+
+-- ── Global state ─────────────────────────────────────────────────
+getgenv().farming      = false
+getgenv().farmsettings = {collect=true,purchase=true,upgrade=true,cashdrop=true,fruit=true}
+getgenv().antiafk      = true
+
+-- ── Cleanup on re-inject ─────────────────────────────────────────
+if pGui:FindFirstChild("MobFarm") then pGui.MobFarm:Destroy() end
+
+-- ── ScreenGui ────────────────────────────────────────────────────
+local GUI = Instance.new("ScreenGui")
+GUI.Name = "MobFarm"; GUI.ResetOnSpawn = false
+GUI.DisplayOrder = 999; GUI.IgnoreGuiInset = true; GUI.Parent = pGui
+
+-- ── Colour palette ───────────────────────────────────────────────
+local C = {
+    bg   = Color3.fromRGB(12,  12,  20),
+    nav  = Color3.fromRGB(20,  20,  33),
+    card = Color3.fromRGB(30,  30,  50),
+    acc  = Color3.fromRGB(105, 82,  232),
+    grn  = Color3.fromRGB(65,  210, 110),
+    red  = Color3.fromRGB(230, 75,  75),
+    txt  = Color3.fromRGB(228, 222, 255),
+    sub  = Color3.fromRGB(135, 125, 170),
+    off  = Color3.fromRGB(58,  58,  82),
+    wht  = Color3.fromRGB(255, 255, 255),
+}
+
+-- ── Tiny helpers ─────────────────────────────────────────────────
+local function crn(f, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 12); c.Parent = f; return c
+end
+
+local function pad(f, t, b, l, r)
+    local p = Instance.new("UIPadding")
+    p.PaddingTop    = UDim.new(0, t or 0); p.PaddingBottom = UDim.new(0, b or 0)
+    p.PaddingLeft   = UDim.new(0, l or 0); p.PaddingRight  = UDim.new(0, r or 0)
+    p.Parent = f; return p
+end
+
+local function vlist(f, gap)
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, gap or 0)
+    l.FillDirection = Enum.FillDirection.Vertical
+    l.SortOrder = Enum.SortOrder.LayoutOrder; l.Parent = f; return l
+end
+
+local function hlist(f, gap)
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, gap or 0)
+    l.FillDirection = Enum.FillDirection.Horizontal
+    l.SortOrder = Enum.SortOrder.LayoutOrder; l.Parent = f; return l
+end
+
+local tw = TweenInfo.new(0.15, Enum.EasingStyle.Quad)
+
+-- ================================================================
+--  FLOATING ACTION BUTTON
+--  Always on screen. Tap = toggle panel. Drag = reposition.
+-- ================================================================
+
+local FB = Instance.new("TextButton")
+FB.Name = "FloatBtn"; FB.Size = UDim2.new(0,62,0,62)
+FB.Position = UDim2.new(0,14,0.72,0); FB.BackgroundColor3 = C.acc
+FB.Text = "🌾"; FB.TextSize = 28; FB.Font = Enum.Font.GothamBold
+FB.TextColor3 = C.wht; FB.BorderSizePixel = 0; FB.ZIndex = 20; FB.Parent = GUI
+crn(FB,31)
+
+-- ================================================================
+--  MAIN PANEL
+-- ================================================================
+
+local Panel = Instance.new("Frame")
+Panel.Name = "Panel"; Panel.Size = UDim2.new(0,312,0,496)
+Panel.Position = UDim2.new(0,88,0.5,-248); Panel.BackgroundColor3 = C.bg
+Panel.BorderSizePixel = 0; Panel.ClipsDescendants = true
+Panel.ZIndex = 10; Panel.Parent = GUI
+crn(Panel,18)
+
+-- ── Title / drag bar ─────────────────────────────────────────────
+local TBar = Instance.new("Frame")
+TBar.Size = UDim2.new(1,0,0,52); TBar.BackgroundColor3 = C.nav
+TBar.BorderSizePixel = 0; TBar.ZIndex = 11; TBar.Parent = Panel
+
+local TLbl = Instance.new("TextLabel")
+TLbl.Text = "⚡ Autofarm"; TLbl.Size = UDim2.new(1,-56,1,0)
+TLbl.Position = UDim2.new(0,14,0,0); TLbl.BackgroundTransparency = 1
+TLbl.TextColor3 = C.txt; TLbl.TextSize = 17; TLbl.Font = Enum.Font.GothamBold
+TLbl.TextXAlignment = Enum.TextXAlignment.Left; TLbl.ZIndex = 12; TLbl.Parent = TBar
+
+-- Close button (top-right)
+local XBtn = Instance.new("TextButton")
+XBtn.Text = "✕"; XBtn.Size = UDim2.new(0,36,0,36)
+XBtn.Position = UDim2.new(1,-44,0.5,-18); XBtn.BackgroundColor3 = C.red
+XBtn.TextColor3 = C.wht; XBtn.TextSize = 14; XBtn.Font = Enum.Font.GothamBold
+XBtn.BorderSizePixel = 0; XBtn.ZIndex = 13; XBtn.Parent = TBar; crn(XBtn,8)
+
+-- ── Tab bar ──────────────────────────────────────────────────────
+local Tabs = Instance.new("Frame")
+Tabs.Size = UDim2.new(1,0,0,46); Tabs.Position = UDim2.new(0,0,0,52)
+Tabs.BackgroundColor3 = C.nav; Tabs.BorderSizePixel = 0; Tabs.ZIndex = 11; Tabs.Parent = Panel
+hlist(Tabs,0)
+
+local function mkTab(label,ico,order)
+    local b = Instance.new("TextButton"); b.LayoutOrder = order
+    b.Size = UDim2.new(0.5,0,1,0); b.BackgroundColor3 = C.nav
+    b.Text = ico.."  "..label; b.TextColor3 = C.sub
+    b.TextSize = 13; b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0; b.ZIndex = 12; b.Parent = Tabs; return b
+end
+
+local T1 = mkTab("Autofarm","🌾",1)
+local T2 = mkTab("Settings","⚙",2)
+
+-- Sliding underline indicator
+local Ind = Instance.new("Frame")
+Ind.Size = UDim2.new(0.5,0,0,3); Ind.Position = UDim2.new(0,0,1,-3)
+Ind.BackgroundColor3 = C.acc; Ind.BorderSizePixel = 0; Ind.ZIndex = 14; Ind.Parent = Tabs
+crn(Ind,2)
+
+-- ── Scrollable content areas ─────────────────────────────────────
+local function mkScroll(visible)
+    local sf = Instance.new("ScrollingFrame")
+    sf.Size = UDim2.new(1,0,1,-98); sf.Position = UDim2.new(0,0,0,98)
+    sf.BackgroundTransparency = 1; sf.BorderSizePixel = 0
+    sf.ScrollBarThickness = 3; sf.ScrollBarImageColor3 = C.acc
+    sf.CanvasSize = UDim2.new(0,0,0,0); sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sf.Visible = visible; sf.ZIndex = 11; sf.Parent = Panel
+    vlist(sf,8); pad(sf,12,20,12,12); return sf
+end
+
+local FarmScroll = mkScroll(true)
+local SettScroll = mkScroll(false)
+
+-- ================================================================
+--  COMPONENT FACTORIES  (big button, toggle card, section header)
+-- ================================================================
+
+-- Section label
+local function secLabel(parent, text, order)
+    local l = Instance.new("TextLabel"); l.LayoutOrder = order
+    l.Size = UDim2.new(1,0,0,24); l.BackgroundTransparency = 1
+    l.TextColor3 = C.sub; l.TextSize = 11; l.Font = Enum.Font.GothamBold
+    l.Text = "  "..text:upper(); l.TextXAlignment = Enum.TextXAlignment.Left
+    l.ZIndex = 12; l.Parent = parent; return l
+end
+
+-- Big action button (Start/Stop)
+local function bigBtn(parent, text, color, order)
+    local b = Instance.new("TextButton"); b.LayoutOrder = order
+    b.Size = UDim2.new(1,0,0,64); b.BackgroundColor3 = color or C.acc
+    b.Text = text; b.TextColor3 = C.wht; b.TextSize = 17; b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0; b.ZIndex = 12; b.Parent = parent; crn(b,14); return b
+end
+
+-- Status row (dot + text)
+local function statusRow(parent, order)
+    local f = Instance.new("Frame"); f.LayoutOrder = order
+    f.Size = UDim2.new(1,0,0,36); f.BackgroundColor3 = C.nav
+    f.BorderSizePixel = 0; f.ZIndex = 12; f.Parent = parent; crn(f,8)
+
+    local dot = Instance.new("Frame"); dot.Size = UDim2.new(0,8,0,8)
+    dot.Position = UDim2.new(0,14,0.5,-4); dot.BackgroundColor3 = C.sub
+    dot.BorderSizePixel = 0; dot.ZIndex = 13; dot.Parent = f; crn(dot,4)
+
+    local lbl = Instance.new("TextLabel"); lbl.Text = "Idle"
+    lbl.Size = UDim2.new(1,-36,1,0); lbl.Position = UDim2.new(0,30,0,0)
+    lbl.BackgroundTransparency = 1; lbl.TextColor3 = C.sub; lbl.TextSize = 13
+    lbl.Font = Enum.Font.Gotham; lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 13; lbl.Parent = f
+    return dot, lbl
+end
+
+-- Toggle card  (icon | label | iOS-style switch)
+local function toggle(parent, ico, label, def, cb, order)
+    local card = Instance.new("Frame"); card.LayoutOrder = order
+    card.Size = UDim2.new(1,0,0,58); card.BackgroundColor3 = C.card
+    card.BorderSizePixel = 0; card.ZIndex = 12; card.Parent = parent; crn(card,12)
+
+    -- icon
+    local iLbl = Instance.new("TextLabel"); iLbl.Text = ico
+    iLbl.Size = UDim2.new(0,40,1,0); iLbl.Position = UDim2.new(0,8,0,0)
+    iLbl.BackgroundTransparency = 1; iLbl.TextSize = 20; iLbl.ZIndex = 13; iLbl.Parent = card
+
+    -- label
+    local tLbl = Instance.new("TextLabel"); tLbl.Text = label
+    tLbl.Size = UDim2.new(1,-112,1,0); tLbl.Position = UDim2.new(0,52,0,0)
+    tLbl.BackgroundTransparency = 1; tLbl.TextColor3 = C.txt; tLbl.TextSize = 14
+    tLbl.Font = Enum.Font.Gotham; tLbl.TextXAlignment = Enum.TextXAlignment.Left
+    tLbl.ZIndex = 13; tLbl.Parent = card
+
+    -- switch track
+    local track = Instance.new("Frame"); track.Size = UDim2.new(0,50,0,28)
+    track.Position = UDim2.new(1,-60,0.5,-14)
+    track.BackgroundColor3 = def and C.grn or C.off
+    track.BorderSizePixel = 0; track.ZIndex = 13; track.Parent = card; crn(track,14)
+
+    -- switch knob
+    local knob = Instance.new("Frame"); knob.Size = UDim2.new(0,22,0,22)
+    knob.Position = def and UDim2.new(1,-24,0.5,-11) or UDim2.new(0,3,0.5,-11)
+    knob.BackgroundColor3 = C.wht; knob.BorderSizePixel = 0
+    knob.ZIndex = 14; knob.Parent = track; crn(knob,11)
+
+    -- invisible full-card tap area
+    local hit = Instance.new("TextButton"); hit.Size = UDim2.new(1,0,1,0)
+    hit.BackgroundTransparency = 1; hit.Text = ""; hit.ZIndex = 16; hit.Parent = card
+
+    local state = def
+    hit.MouseButton1Click:Connect(function()
+        state = not state; cb(state)
+        TweenService:Create(track, tw, {BackgroundColor3 = state and C.grn or C.off}):Play()
+        TweenService:Create(knob,  tw, {
+            Position = state and UDim2.new(1,-24,0.5,-11) or UDim2.new(0,3,0.5,-11)
+        }):Play()
+    end)
+    return card
+end
+
+-- ================================================================
+--  BUILD: Farm Tab
+-- ================================================================
+
+local StartBtn     = bigBtn(FarmScroll, "▶  Start Autofarm", C.acc, 1)
+local SDot, SLbl   = statusRow(FarmScroll, 2)
+secLabel(FarmScroll, "Farm Options", 3)
+toggle(FarmScroll,"💰","Auto Collect Income",  true, function(v) getgenv().farmsettings.collect  = v end, 4)
+toggle(FarmScroll,"🛒","Auto Purchase",         true, function(v) getgenv().farmsettings.purchase = v end, 5)
+toggle(FarmScroll,"⬆️","Auto Upgrade",          true, function(v) getgenv().farmsettings.upgrade  = v end, 6)
+toggle(FarmScroll,"💵","Auto Cash Drop",        true, function(v) getgenv().farmsettings.cashdrop = v end, 7)
+toggle(FarmScroll,"🍋","Auto Pickup Fruit",     true, function(v) getgenv().farmsettings.fruit    = v end, 8)
+
+-- ================================================================
+--  BUILD: Settings Tab
+-- ================================================================
+
+secLabel(SettScroll, "Performance", 1)
+toggle(SettScroll,"🎮","Disable 3D Rendering", false, function(v)
+    game:GetService("RunService"):Set3dRenderingEnabled(not v)
+end, 2)
+toggle(SettScroll,"🏃","Anti AFK", true, function(v)
+    getgenv().antiafk = v
+end, 3)
+
+-- ================================================================
+--  TAB SWITCHING
+-- ================================================================
+
+local accentTab = Color3.fromRGB(38,30,80)
+
+local function switchTo(farm)
+    FarmScroll.Visible = farm; SettScroll.Visible = not farm
+    T1.BackgroundColor3 = farm and accentTab or C.nav
+    T1.TextColor3       = farm and C.wht     or C.sub
+    T2.BackgroundColor3 = not farm and accentTab or C.nav
+    T2.TextColor3       = not farm and C.wht     or C.sub
+    TweenService:Create(Ind, TweenInfo.new(0.2,Enum.EasingStyle.Quad), {
+        Position = farm and UDim2.new(0,0,1,-3) or UDim2.new(0.5,0,1,-3)
+    }):Play()
+end
+
+T1.MouseButton1Click:Connect(function() switchTo(true)  end)
+T2.MouseButton1Click:Connect(function() switchTo(false) end)
+switchTo(true) -- default to Farm tab
+
+-- ================================================================
+--  PANEL SHOW / HIDE  (animated slide)
+-- ================================================================
+
+local pOpen = true
+
+local function setPanel(open)
+    pOpen = open
+    TweenService:Create(Panel, TweenInfo.new(0.25,Enum.EasingStyle.Quad), {
+        Position = open
+            and UDim2.new(0,88,0.5,-248)
+            or  UDim2.new(0,-320,0.5,-248)
+    }):Play()
+    FB.Text = open and "✕" or "🌾"
+end
+
+XBtn.MouseButton1Click:Connect(function() setPanel(false) end)
+
+-- ================================================================
+--  DRAG: Floating Button  (drag to move, tap to toggle panel)
+-- ================================================================
+
+do
+    local dn,di,sp,sm,mv = false,nil,nil,nil,false
+
+    FB.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch
+        or i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dn=true; mv=false; sp=FB.Position; sm=i.Position; di=i
+        end
+    end)
+
+    FB.InputEnded:Connect(function(i)
+        if i == di then
+            dn=false
+            if not mv then setPanel(not pOpen) end -- tap = toggle
+            mv=false
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(i)
+        if not dn then return end
+        if i.UserInputType==Enum.UserInputType.Touch
+        or i.UserInputType==Enum.UserInputType.MouseMovement then
+            local d = i.Position - sm
+            if d.Magnitude > 8 then
+                mv = true
+                FB.Position = UDim2.new(sp.X.Scale, sp.X.Offset+d.X,
+                                        sp.Y.Scale, sp.Y.Offset+d.Y)
+            end
+        end
+    end)
+end
+
+-- ================================================================
+--  DRAG: Panel  (via title bar)
+-- ================================================================
+
+do
+    local dn,di,sp,sm = false,nil,nil,nil
+
+    TBar.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.Touch
+        or i.UserInputType==Enum.UserInputType.MouseButton1 then
+            dn=true; sp=Panel.Position; sm=i.Position; di=i
+        end
+    end)
+
+    TBar.InputEnded:Connect(function(i)
+        if i==di then dn=false end
+    end)
+
+    UserInputService.InputChanged:Connect(function(i)
+        if not dn then return end
+        if i.UserInputType==Enum.UserInputType.Touch
+        or i.UserInputType==Enum.UserInputType.MouseMovement then
+            local d = i.Position - sm
+            Panel.Position = UDim2.new(sp.X.Scale, sp.X.Offset+d.X,
+                                       sp.Y.Scale, sp.Y.Offset+d.Y)
+        end
+    end)
+end
+
+-- ================================================================
+--  FARM LOGIC  (unchanged, just cleaned up)
+-- ================================================================
+
+local farming = false
+local PF = tycoon.Purchases
+
+tycoon.Remotes.PhoneOffer.OnClientEvent:Connect(function()
+    if not farming then return end
+    tycoon.Remotes.PhoneOffer:FireServer("Accept")
+end)
+
+local function setFarm(on)
+    farming = on; getgenv().farming = on
+    StartBtn.Text             = on and "⏹  Stop Autofarm" or "▶  Start Autofarm"
+    StartBtn.BackgroundColor3 = on and C.red              or C.acc
+    SDot.BackgroundColor3     = on and C.grn              or C.sub
+    SLbl.Text                 = on and "Farming active…"  or "Idle"
+    SLbl.TextColor3           = on and C.grn              or C.sub
+end
+
+local function farmLoop()
+    local streams = tycoon.Values.Income.Streams
+
+    -- Collect thread runs independently so it doesn't block purchases
+    task.spawn(function()
+        while farming do
+            if getgenv().farmsettings.collect then
+                for _, v in pairs(streams:GetChildren()) do
+                    tycoon.Remotes.WakeIncomeStream:InvokeServer(v.Name)
+                end
+            end
+            task.wait()
+        end
+    end)
+
+    while farming do
+        -- Purchase
+        pcall(function()
+            if not getgenv().farmsettings.purchase then return end
+            for _, fold in pairs(PF:GetChildren()) do
+                if not fold:FindFirstChild("Buttons") then continue end
+                for _, nf in pairs(fold.Buttons:GetChildren()) do
+                    local list = nf:IsA("Folder") and nf:GetChildren()
+                              or (nf:IsA("Model") and {nf} or {})
+                    for _, btn in pairs(list) do
+                        if btn:GetAttribute("Shown") and btn:GetAttribute("Enabled")
+                        and not btn:GetAttribute("Purchased") then
+                            local price = dec(btn.Button.Gui.Price.Text)
+                            local bal   = dec(plr.leaderstats.Cash.Value)
+                            if price and bal and price <= bal then
+                                firetouchinterest(plr.Character.Head, btn.Button, true)
+                                task.wait()
+                                firetouchinterest(plr.Character.Head, btn.Button, false)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+
+        -- Upgrade
+        pcall(function()
+            if not getgenv().farmsettings.upgrade then return end
+            for _, fold in pairs(PF:GetChildren()) do
+                local inner = fold:FindFirstChild(fold.Name)
+                if inner and inner:GetAttribute("Enabled") then
+                    inner:FindFirstChild(fold.Name).Upgrade:InvokeServer(1)
+                end
+            end
+        end)
+
+        -- Cash drops
+        pcall(function()
+            if not getgenv().farmsettings.cashdrop then return end
+            for _, v in pairs(workspace.CashDrops:GetChildren()) do
+                firetouchinterest(plr.Character.Head, v, true)
+                task.wait()
+                firetouchinterest(plr.Character.Head, v, false)
+            end
+        end)
+
+        -- Fruit
+        pcall(function()
+            if not getgenv().farmsettings.fruit then return end
+            for _, v in pairs(tycoon.Constant.Trees:GetChildren()) do
+                for _, f in pairs(v:GetChildren()) do
+                    if f.Name == "Fruit" and f:FindFirstChild("ClickPart") then
+                        fireclickdetector(f.ClickPart.ClickDetector)
+                        task.wait()
+                    end
+                end
+            end
+        end)
+
+        task.wait(1)
+    end
+end
+
+StartBtn.MouseButton1Click:Connect(function()
+    if not farming then
+        setFarm(true); task.spawn(farmLoop)
+    else
+        setFarm(false)
+    end
+end)
+
+-- ── Anti AFK ─────────────────────────────────────────────────────
+plr.Idled:Connect(function()
+    if not getgenv().antiafk then return end
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
