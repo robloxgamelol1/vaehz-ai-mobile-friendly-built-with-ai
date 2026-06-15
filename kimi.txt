@@ -1,0 +1,429 @@
+local CalmLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/IcantAffordSynapse/calmlib/refs/heads/main/src.lua"))()
+
+-- ==================== MOBILE CONFIG ====================
+local MOBILE = game:GetService("UserInputService").TouchEnabled
+local SETTINGS = {
+    batchSize = 5,          -- Process X items per frame
+    yieldEvery = 0.05,      -- Yield every X seconds
+    updateInterval = 0.3,   -- UI update interval
+    touchPadding = 20,      -- Larger touch targets
+    lowPowerMode = MOBILE,  -- Auto-enable on mobile
+}
+
+-- ==================== SERVICES (Cached) ====================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local plr = Players.LocalPlayer
+local cam = workspace.CurrentCamera
+
+-- ==================== MOBILE-OPTIMIZED UI ====================
+local window = CalmLib:win("📱 Mobile Hub")
+local autofarmTab = window:tab("⚡ Auto", "rbxassetid://109121102062195")
+local settingsTab = window:tab("🔧 Settings", "rbxassetid://99579688577014")
+
+-- Mobile-friendly button sizing
+local function makeMobileFriendly(btn)
+    if not MOBILE then return end
+    local padding = SETTINGS.touchPadding
+    -- Add invisible touch padding
+    local hitbox = Instance.new("Frame")
+    hitbox.Name = "MobileHitbox"
+    hitbox.BackgroundTransparency = 1
+    hitbox.Size = UDim2.new(1, padding*2, 1, padding*2)
+    hitbox.Position = UDim2.new(0, -padding, 0, -padding)
+    hitbox.ZIndex = btn.ZIndex - 1
+    hitbox.Parent = btn
+end
+
+-- ==================== GLOBAL STATE ====================
+getgenv().farming = false
+getgenv().farmsettings = {
+    purchase = true,
+    upgrade = true,
+    collect = true,
+    cashdrop = true,
+    fruit = true
+}
+getgenv().antiafk = true
+
+-- ==================== CACHE SYSTEM ====================
+local Cache = {
+    tycoon = nil,
+    purchases = nil,
+    stands = nil,
+    cashDrops = nil,
+    trees = nil,
+    lastUpdate = 0,
+    connections = {},
+    buttons = {},
+    upgrades = {},
+}
+
+-- Smart cache with auto-refresh
+local function getTycoon()
+    if Cache.tycoon and Cache.tycoon.Parent then return Cache.tycoon end
+    for _, v in pairs(workspace:GetChildren()) do
+        if v.Name:find("Tycoon") and v:FindFirstChild("Owner") and v.Owner.Value == plr then
+            Cache.tycoon = v
+            Cache.purchases = v:FindFirstChild("Purchases")
+            Cache.stands = v:WaitForChild("Values").Income.Streams
+            Cache.trees = v:WaitForChild("Constant").Trees
+            return v
+        end
+    end
+    return nil
+end
+
+-- ==================== SUFFIX DECODER (Optimized) ====================
+local suffixes = {
+    K = 1e3, M = 1e6, B = 1e9, T = 1e12,
+    Qd = 1e15, Qn = 1e18, Sx = 1e21, Sxd = 1e21,
+    Sp = 1e24, Oc = 1e27, No = 1e30, Dc = 1e33,
+}
+
+local suffixCache = {}
+local function decodeValue(str)
+    if not str then return nil end
+    if suffixCache[str] then return suffixCache[str] end
+
+    local clean = str:gsub("[
+8
+8-
+8c]", ""):gsub("$", "")
+    local numStr, suffix = clean:match("([%d%,%.]+)(%a*)")
+    if not numStr then return nil end
+
+    local num = tonumber((numStr:gsub(",", "")))
+    if not num then return nil end
+
+    if suffix == "" then
+        suffixCache[str] = num
+        return num
+    end
+
+    local mult = suffixes[suffix] or suffixes[suffix:sub(1,1):upper() .. suffix:sub(2):lower()]
+    if mult then
+        local result = num * mult
+        suffixCache[str] = result
+        return result
+    end
+    return num
+end
+
+-- ==================== BATCH PROCESSOR ====================
+local function processBatch(items, processor, onComplete)
+    local count = 0
+    local total = #items
+
+    for i, item in ipairs(items) do
+        processor(item)
+        count = count + 1
+
+        -- Yield every batchSize items to prevent freezing
+        if count % SETTINGS.batchSize == 0 then
+            RunService.Heartbeat:Wait()
+        end
+    end
+
+    if onComplete then onComplete() end
+end
+
+-- ==================== SMART THROTTLER ====================
+local Throttle = {}
+function Throttle:check(key, interval)
+    local now = tick()
+    if not self[key] or (now - self[key]) >= interval then
+        self[key] = now
+        return true
+    end
+    return false
+end
+
+-- ==================== PHONE OFFER (Optimized) ====================
+local phoneConnection = nil
+local function setupPhoneOffer()
+    local tycoon = getTycoon()
+    if not tycoon then return end
+
+    if phoneConnection then phoneConnection:Disconnect() end
+    phoneConnection = tycoon.Remotes.PhoneOffer.OnClientEvent:Connect(function()
+        if not getgenv().farming then return end
+        if not Throttle:check("phone", 1) then return end
+        tycoon.Remotes.PhoneOffer:FireServer("Accept")
+    end)
+end
+
+-- ==================== INCOME COLLECTION (Batched) ====================
+local function collectIncome()
+    if not getgenv().farmsettings.collect then return end
+    local tycoon = getTycoon()
+    if not tycoon then return end
+
+    local stands = Cache.stands
+    if not stands then return end
+
+    local streams = stands:GetChildren()
+    local remote = tycoon.Remotes.WakeIncomeStream
+
+    processBatch(streams, function(stream)
+        if stream and stream.Name then
+            pcall(function()
+                remote:InvokeServer(stream.Name)
+            end)
+        end
+    end)
+end
+
+-- ==================== PURCHASE SYSTEM (Smart Cached) ====================
+local function refreshButtonCache()
+    local tycoon = getTycoon()
+    if not tycoon then return end
+    local purchases = Cache.purchases
+    if not purchases then return end
+
+    Cache.buttons = {}
+    Cache.upgrades = {}
+
+    for _, fold in pairs(purchases:GetChildren()) do
+        if fold:FindFirstChild("Buttons") then
+            for _, nFold in pairs(fold.Buttons:GetChildren()) do
+                if nFold:IsA("Folder") then
+                    for _, btn in pairs(nFold:GetChildren()) do
+                        if btn:GetAttribute("Shown") and btn:GetAttribute("Enabled") and not btn:GetAttribute("Purchased") then
+                            table.insert(Cache.buttons, btn)
+                        end
+                    end
+                elseif nFold:IsA("Model") then
+                    if nFold:GetAttribute("Shown") and nFold:GetAttribute("Enabled") and not nFold:GetAttribute("Purchased") then
+                        table.insert(Cache.buttons, nFold)
+                    end
+                end
+            end
+        end
+
+        -- Cache upgrades
+        local upgradeObj = fold:FindFirstChild(fold.Name)
+        if upgradeObj and upgradeObj:GetAttribute("Enabled") then
+            table.insert(Cache.upgrades, upgradeObj)
+        end
+    end
+end
+
+local function autoPurchase()
+    if not getgenv().farmsettings.purchase then return end
+    if not Throttle:check("purchase", 0.5) then return end
+
+    local tycoon = getTycoon()
+    if not tycoon then return end
+
+    -- Refresh cache every 5 seconds
+    if Throttle:check("refreshCache", 5) then
+        refreshButtonCache()
+    end
+
+    local cash = decodeValue(plr.leaderstats.Cash.Value)
+    if not cash then return end
+
+    local head = plr.Character and plr.Character:FindFirstChild("Head")
+    if not head then return end
+
+    local purchased = 0
+    for _, btn in ipairs(Cache.buttons) do
+        if not btn.Parent then continue end
+
+        local priceText = btn:FindFirstChild("Button") and btn.Button:FindFirstChild("Gui") and btn.Button.Gui:FindFirstChild("Price")
+        if not priceText then continue end
+
+        local price = decodeValue(priceText.Text)
+        if price and price <= cash then
+            pcall(function()
+                firetouchinterest(head, btn.Button, 0)
+                task.wait(0.05)
+                firetouchinterest(head, btn.Button, 1)
+            end)
+            purchased = purchased + 1
+            if purchased >= 3 then break end -- Max 3 per cycle to prevent lag
+        end
+    end
+end
+
+-- ==================== UPGRADE SYSTEM (Throttled) ====================
+local function autoUpgrade()
+    if not getgenv().farmsettings.upgrade then return end
+    if not Throttle:check("upgrade", 1) then return end
+
+    if #Cache.upgrades == 0 then refreshButtonCache() end
+
+    local upgraded = 0
+    for _, obj in ipairs(Cache.upgrades) do
+        if not obj.Parent then continue end
+        pcall(function()
+            obj:FindFirstChild(obj.Name).Upgrade:InvokeServer(1)
+        end)
+        upgraded = upgraded + 1
+        if upgraded >= 2 then break end -- Max 2 per cycle
+    end
+end
+
+-- ==================== CASH DROPS (Proximity Optimized) ====================
+local function collectCashDrops()
+    if not getgenv().farmsettings.cashdrop then return end
+    if not Throttle:check("cashdrop", 0.5) then return end
+
+    local head = plr.Character and plr.Character:FindFirstChild("Head")
+    if not head then return end
+
+    local pos = head.Position
+    local drops = workspace:FindFirstChild("CashDrops")
+    if not drops then return end
+
+    local collected = 0
+    for _, drop in pairs(drops:GetChildren()) do
+        if drop and (drop.Position - pos).Magnitude < 50 then -- Only nearby drops
+            pcall(function()
+                firetouchinterest(head, drop, 0)
+                task.wait(0.03)
+                firetouchinterest(head, drop, 1)
+            end)
+            collected = collected + 1
+            if collected >= 5 then break end -- Max 5 per cycle
+        end
+    end
+end
+
+-- ==================== FRUIT COLLECTION (Smart) ====================
+local function collectFruit()
+    if not getgenv().farmsettings.fruit then return end
+    if not Throttle:check("fruit", 1) then return end
+
+    local tycoon = getTycoon()
+    if not tycoon then return end
+    local trees = Cache.trees
+    if not trees then return end
+
+    local collected = 0
+    for _, tree in pairs(trees:GetChildren()) do
+        for _, fruit in pairs(tree:GetChildren()) do
+            if fruit.Name == "Fruit" and fruit:FindFirstChild("ClickPart") then
+                pcall(function()
+                    fireclickdetector(fruit.ClickPart.ClickDetector)
+                end)
+                collected = collected + 1
+                if collected >= 3 then return end -- Max 3 per cycle
+            end
+        end
+    end
+end
+
+-- ==================== MAIN FARM LOOP (Non-blocking) ====================
+local farmThread = nil
+local function startFarming()
+    if farmThread then return end
+
+    farmThread = task.spawn(function()
+        while getgenv().farming do
+            local startTime = tick()
+
+            -- Run all systems with error isolation
+            pcall(collectIncome)
+            pcall(autoPurchase)
+            pcall(autoUpgrade)
+            pcall(collectCashDrops)
+            pcall(collectFruit)
+
+            -- Dynamic wait based on performance
+            local elapsed = tick() - startTime
+            local waitTime = math.max(0.5, SETTINGS.lowPowerMode and 1.5 or 1.0 - elapsed)
+            task.wait(waitTime)
+        end
+        farmThread = nil
+    end)
+end
+
+-- ==================== ANTI-AFK (Mobile Optimized) ====================
+local afkConnection = nil
+local function setupAntiAFK()
+    if afkConnection then afkConnection:Disconnect() end
+    afkConnection = plr.Idled:Connect(function()
+        if not getgenv().antiafk then return end
+        if not Throttle:check("afk", 60) then return end
+        VirtualUser:Button2Down(Vector2.new(0, 0), cam.CFrame)
+        task.wait(0.1)
+        VirtualUser:Button2Up(Vector2.new(0, 0), cam.CFrame)
+    end)
+end
+
+-- ==================== MOBILE TOGGLES (Large Touch Targets) ====================
+autofarmTab:toggle("⚡ Auto Farm", false, function(bool)
+    getgenv().farming = bool
+    if bool then
+        setupPhoneOffer()
+        startFarming()
+    end
+end)
+
+autofarmTab:label("📱 Mobile Settings:")
+
+autofarmTab:toggle("🛒 Auto Purchase", true, function(v)
+    getgenv().farmsettings.purchase = v
+end)
+autofarmTab:toggle("💰 Auto Collect", true, function(v)
+    getgenv().farmsettings.collect = v
+end)
+autofarmTab:toggle("⬆️ Auto Upgrade", true, function(v)
+    getgenv().farmsettings.upgrade = v
+end)
+autofarmTab:toggle("💵 Auto Cash Drop", true, function(v)
+    getgenv().farmsettings.cashdrop = v
+end)
+autofarmTab:toggle("🍋 Auto Fruit", true, function(v)
+    getgenv().farmsettings.fruit = v
+end)
+
+-- ==================== PERFORMANCE SETTINGS ====================
+settingsTab:toggle("🔋 Low Power Mode", MOBILE, function(v)
+    SETTINGS.lowPowerMode = v
+    SETTINGS.batchSize = v and 3 or 5
+    SETTINGS.yieldEvery = v and 0.1 or 0.05
+end)
+
+settingsTab:toggle("👁️ Disable 3D Render", false, function(v)
+    RunService:Set3dRenderingEnabled(not v)
+end)
+
+settingsTab:toggle("😴 Anti AFK", true, function(v)
+    getgenv().antiafk = v
+end)
+
+settingsTab:toggle("📶 Auto Reconnect", true, function(v)
+    getgenv().autoreconnect = v
+end)
+
+-- ==================== INIT ====================
+setupAntiAFK()
+getTycoon() -- Pre-cache
+
+-- Auto-reconnect on error
+game:GetService("CoreGui").ChildRemoved:Connect(function(child)
+    if child.Name:find("CalmLib") and getgenv().autoreconnect then
+        task.wait(2)
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/IcantAffordSynapse/calmlib/refs/heads/main/src.lua"))()
+    end
+end)
+
+-- Memory cleanup every 60 seconds
+task.spawn(function()
+    while true do
+        task.wait(60)
+        suffixCache = {} -- Clear number cache
+        if not getgenv().farming then
+            Cache.buttons = {}
+            Cache.upgrades = {}
+        end
+    end
+end)
+
+print("📱 Mobile Optimized Hub Loaded! | Low Power: " .. tostring(SETTINGS.lowPowerMode))
