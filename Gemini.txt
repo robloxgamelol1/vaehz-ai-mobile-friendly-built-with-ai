@@ -1,0 +1,206 @@
+local CalmLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/IcantAffordSynapse/calmlib/refs/heads/main/src.lua"))()
+
+local window = CalmLib:win("sub 2 vaehz")
+local section1 = window:tab("Autofarm", "rbxassetid://109121102062195")
+local section2 = window:tab("Settings", "rbxassetid://99579688577014")
+
+local plr = game:GetService("Players").LocalPlayer
+
+getgenv().farming = false
+getgenv().farmsettings = {
+    purchase = true,
+    upgrade = true,
+    collect = true,
+    cashdrop = true,
+    fruit = true
+}
+
+local tycoon
+for _, v in pairs(workspace:GetChildren()) do
+    if v.Name:find("Tycoon") and v:FindFirstChild("Owner") and v.Owner.Value == plr then
+        tycoon = v
+        break -- Stop looping once found to save memory
+    end
+end
+
+local suffixes = {
+    K   = 1e3,  M   = 1e6,  B   = 1e9,  T   = 1e12,
+    Qd  = 1e15, Qd  = 1e15, Qn  = 1e18, Sx  = 1e21, 
+    Sxd = 1e21, Sp  = 1e24, Oc  = 1e27, No  = 1e30, Dc  = 1e33,
+}
+
+function decodeValue(str)
+    if not str then return 0 end
+    local clean = str:gsub("[\226\128\128-\226\128\143]", "")
+    local numStr, suffix = clean:match("%$([%d%,%.]+)(%a*)")
+    if not numStr then return tonumber(clean) or 0 end
+
+    local num = tonumber((numStr:gsub(",", "")))
+    if not num then return 0 end
+    if suffix == "" then return num end
+
+    local multiplier = suffixes[suffix]
+    if not multiplier then
+        suffix = suffix:sub(1,1):upper() .. suffix:sub(2):lower()
+        multiplier = suffixes[suffix]
+    end
+
+    return multiplier and (num * multiplier) or num
+end
+
+local PurchasesFold = tycoon and tycoon:FindFirstChild("Purchases")
+
+-- Phone Offer Auto-Accept
+if tycoon and tycoon:FindFirstChild("Remotes") and tycoon.Remotes:FindFirstChild("PhoneOffer") then
+    tycoon.Remotes.PhoneOffer.OnClientEvent:Connect(function()
+        if not getgenv().farming then return end
+        tycoon.Remotes.PhoneOffer:FireServer("Accept")
+    end)
+end
+
+section1:toggle("Autofarm", false, function(bool)
+    getgenv().farming = bool
+    if not getgenv().farming or not tycoon then return end
+    
+    local stands = tycoon:FindFirstChild("Values") and tycoon.Values:FindFirstChild("Income") and tycoon.Values.Income:FindFirstChild("Streams")
+    
+    -- Step 1. Collect money (Isolated thread with pacing)
+    task.spawn(function()
+        while getgenv().farming do
+            if getgenv().farmsettings.collect and stands then
+                for _, v in pairs(stands:GetChildren()) do
+                    if tycoon.Remotes:FindFirstChild("WakeIncomeStream") then
+                        -- Using task.spawn prevents server response delay from freezing the client
+                        task.spawn(function()
+                            tycoon.Remotes.WakeIncomeStream:InvokeServer(v.Name)
+                        end)
+                    end
+                end
+            end
+            task.wait(1.5) -- Mobile friendly interval for collection
+        end
+    end)
+
+    -- Main Autofarm Loop (Steps 2-5 distributed cleanly)
+    task.spawn(function()
+        while getgenv().farming do
+            local character = plr.Character
+            local head = character and character:FindFirstChild("Head")
+            
+            -- Cache current balance ONCE per loop cycle instead of a thousand times inside nested loops
+            local cashStat = plr:FindFirstChild("leaderstats") and plr.leaderstats:FindFirstChild("Cash")
+            local curbalance = cashStat and decodeValue(tostring(cashStat.Value)) or 0
+
+            -- Step 2. Buy cool stuff
+            if getgenv().farmsettings.purchase companionship and PurchasesFold and head then
+                pcall(function()
+                    for _, fold in pairs(PurchasesFold:GetChildren()) do
+                        if fold:FindFirstChild("Buttons") then
+                            for _, nFold in pairs(fold.Buttons:GetChildren()) do
+                                -- Yield lightly to keep mobile UI interactive and prevent screen freezes
+                                task.wait(0.01) 
+                                if not getgenv().farming then return end
+
+                                if nFold:IsA("Folder") then
+                                    for _, btn in pairs(nFold:GetChildren()) do
+                                        if btn:GetAttribute("Shown") and btn:GetAttribute("Enabled") and not btn:GetAttribute("Purchased") then
+                                            local price = decodeValue(btn.Button.Gui.Price.Text)
+                                            if price <= curbalance then
+                                                firetouchinterest(head, btn.Button, true)
+                                                task.wait(0.02)
+                                                firetouchinterest(head, btn.Button, false)
+                                                curbalance = curbalance - price -- Optimistic deduction to save CPU cycles
+                                            end
+                                        end
+                                    end
+                                elseif nFold:IsA("Model") then
+                                    if nFold:GetAttribute("Shown") and nFold:GetAttribute("Enabled") and not nFold:GetAttribute("Purchased") then
+                                        local price = decodeValue(nFold.Button.Gui.Price.Text)
+                                        if price <= curbalance then
+                                            firetouchinterest(head, nFold.Button, true)
+                                            task.wait(0.02)
+                                            firetouchinterest(head, nFold.Button, false)
+                                            curbalance = curbalance - price
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+
+            -- Step 3. Upgrade everything
+            if getgenv().farmsettings.upgrade and PurchasesFold then
+                pcall(function()
+                    for _, fold in pairs(PurchasesFold:GetChildren()) do
+                        local upgradeTarget = fold:FindFirstChild(fold.Name)
+                        if upgradeTarget and upgradeTarget:GetAttribute("Enabled") then
+                            local upgradeRemote = upgradeTarget:FindFirstChild(fold.Name) and upgradeTarget[fold.Name]:FindFirstChild("Upgrade")
+                            if upgradeRemote then
+                                -- Spawning prevents InvokeServer from hanging the whole loop
+                                task.spawn(function()
+                                    upgradeRemote:InvokeServer(1)
+                                end)
+                            end
+                        end
+                    end
+                end)
+            end
+
+            -- Step 4. Cash drops
+            if getgenv().farmsettings.cashdrop and workspace:FindFirstChild("CashDrops") and head then
+                pcall(function()
+                    for _, v in pairs(workspace.CashDrops:GetChildren()) do
+                        firetouchinterest(head, v, true)
+                        task.wait(0.01)
+                        firetouchinterest(head, v, false)
+                    end
+                end)
+            end
+
+            -- Step 5. Collect fruit
+            if getgenv().farmsettings.fruit and tycoon:FindFirstChild("Constant") and tycoon.Constant:FindFirstChild("Trees") then
+                pcall(function()
+                    for _, v in pairs(tycoon.Constant.Trees:GetChildren()) do
+                        for _, lemon in pairs(v:GetChildren()) do
+                            if lemon.Name == "Fruit" and lemon:FindFirstChild("ClickPart") and lemon.ClickPart:FindFirstChild("ClickDetector") then
+                                fireclickdetector(lemon.ClickPart.ClickDetector)
+                            end
+                        end
+                        task.wait(0.02) -- Small break between tree checks to avoid hardware choking
+                    end
+                end)
+            end
+
+            task.wait(0.8) -- Balanced delay loop rhythm for mobile processors
+        end
+    end)
+end)
+
+-- UI Toggles Section
+section1:label("Settings:")
+section1:toggle("Auto Purchase", true, function(v) getgenv().farmsettings.purchase = v end)
+section1:toggle("Auto Collect", true, function(v) getgenv().farmsettings.collect = v end)
+section1:toggle("Auto Upgrade", true, function(v) getgenv().farmsettings.upgrade = v end)
+section1:toggle("Auto Cash Drop", true, function(v) getgenv().farmsettings.cashdrop = v end)
+section1:toggle("Auto Pickup Fruit", true, function(v) getgenv().farmsettings.fruit = v end)
+
+-- Anti AFK Engine Optimization
+getgenv().antiafk = true
+plr.Idled:Connect(function()
+    if not getgenv().antiafk then return end
+    pcall(function()
+        game:GetService("VirtualUser"):Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        game:GetService("VirtualUser"):Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+    end)
+end)
+
+-- Performance Menu Settings
+section2:toggle("Disable 3D Rendering", false, function(v)
+    game:GetService("RunService"):Set3dRenderingEnabled(not v)
+end)
+
+section2:toggle("Anti AFK", true, function(v)
+    getgenv().antiafk = v
+end)
