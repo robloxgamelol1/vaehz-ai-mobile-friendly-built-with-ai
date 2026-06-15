@@ -1,0 +1,200 @@
+--// LOAD UI
+local CalmLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/IcantAffordSynapse/calmlib/refs/heads/main/src.lua"))()
+
+local window = CalmLib:win("📱 Mobile Tycoon")
+local section1 = window:tab("Farm", "")
+local section2 = window:tab("Settings", "")
+
+--// PLAYER
+local plr = game:GetService("Players").LocalPlayer
+local RunService = game:GetService("RunService")
+
+--// GLOBALS
+getgenv().farming = false
+getgenv().farmsettings = {
+    purchase = true,
+    upgrade = true,
+    collect = true,
+    cashdrop = true,
+    fruit = true
+}
+
+--// FIND TYCOON
+local tycoon
+for _, v in pairs(workspace:GetChildren()) do
+    if v.Name:find("Tycoon") and v:FindFirstChild("Owner") and v.Owner.Value == plr then
+        tycoon = v
+    end
+end
+
+local PurchasesFold = tycoon and tycoon:FindFirstChild("Purchases")
+
+--// VALUE DECODER
+local suffixes = {
+    K=1e3,M=1e6,B=1e9,T=1e12,Qd=1e15,Qn=1e18,Sx=1e21,Sp=1e24,Oc=1e27,No=1e30,Dc=1e33
+}
+
+function decodeValue(str)
+    local num, suf = str:match("%$([%d%,%.]+)(%a*)")
+    if not num then return nil end
+    num = tonumber(num:gsub(",", ""))
+    return suf ~= "" and num * (suffixes[suf] or 1) or num
+end
+
+--// PERFORMANCE SETTINGS
+pcall(function()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+RunService:Set3dRenderingEnabled(false)
+
+--// SAFE EXECUTE
+local function safeRun(fn)
+    local ok = pcall(fn)
+    if not ok then return end
+end
+
+--// THROTTLE SYSTEM
+local delay = {
+    collect = 0.4,
+    purchase = 0.6,
+    upgrade = 0.8,
+    cashdrop = 1,
+    fruit = 1.2
+}
+
+local last = {
+    collect = 0,
+    purchase = 0,
+    upgrade = 0,
+    cashdrop = 0,
+    fruit = 0
+}
+
+--// MAIN LOOP (SMOOTH)
+RunService.Heartbeat:Connect(function()
+    if not getgenv().farming or not tycoon then return end
+
+    local now = tick()
+    local cash = decodeValue(plr.leaderstats.Cash.Value)
+
+    -- COLLECT
+    if getgenv().farmsettings.collect and now - last.collect > delay.collect then
+        last.collect = now
+        safeRun(function()
+            for _, v in pairs(tycoon.Values.Income.Streams:GetChildren()) do
+                tycoon.Remotes.WakeIncomeStream:InvokeServer(v.Name)
+            end
+        end)
+    end
+
+    -- PURCHASE
+    if getgenv().farmsettings.purchase and now - last.purchase > delay.purchase then
+        last.purchase = now
+        safeRun(function()
+            for _, fold in pairs(PurchasesFold:GetChildren()) do
+                if not fold:FindFirstChild("Buttons") then continue end
+
+                for _, group in pairs(fold.Buttons:GetChildren()) do
+                    local items = group:IsA("Folder") and group:GetChildren() or {group}
+
+                    for _, btn in pairs(items) do
+                        if btn:GetAttribute("Enabled") and not btn:GetAttribute("Purchased") then
+                            local price = decodeValue(btn.Button.Gui.Price.Text)
+
+                            if price and cash and price <= cash then
+                                firetouchinterest(plr.Character.Head, btn.Button, 0)
+                                task.wait(0.05)
+                                firetouchinterest(plr.Character.Head, btn.Button, 1)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- UPGRADE
+    if getgenv().farmsettings.upgrade and now - last.upgrade > delay.upgrade then
+        last.upgrade = now
+        safeRun(function()
+            for _, fold in pairs(PurchasesFold:GetChildren()) do
+                local upg = fold:FindFirstChild(fold.Name)
+                if upg and upg:GetAttribute("Enabled") then
+                    upg[fold.Name].Upgrade:InvokeServer(1)
+                end
+            end
+        end)
+    end
+
+    -- CASH DROPS
+    if getgenv().farmsettings.cashdrop and now - last.cashdrop > delay.cashdrop then
+        last.cashdrop = now
+        safeRun(function()
+            for _, v in pairs(workspace.CashDrops:GetChildren()) do
+                firetouchinterest(plr.Character.Head, v, 0)
+                task.wait(0.03)
+                firetouchinterest(plr.Character.Head, v, 1)
+            end
+        end)
+    end
+
+    -- FRUIT
+    if getgenv().farmsettings.fruit and now - last.fruit > delay.fruit then
+        last.fruit = now
+        safeRun(function()
+            for _, tree in pairs(tycoon.Constant.Trees:GetChildren()) do
+                for _, fruit in pairs(tree:GetChildren()) do
+                    if fruit:FindFirstChild("ClickPart") then
+                        fireclickdetector(fruit.ClickPart.ClickDetector)
+                        task.wait(0.03)
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+--// UI (MOBILE FRIENDLY)
+section1:label("📱 Mobile Farm")
+
+section1:toggle("🔥 Start / Stop", false, function(v)
+    getgenv().farming = v
+end)
+
+section1:toggle("💰 Collect", true, function(v)
+    getgenv().farmsettings.collect = v
+end)
+
+section1:toggle("🛒 Buy", true, function(v)
+    getgenv().farmsettings.purchase = v
+end)
+
+section1:toggle("⬆️ Upgrade", true, function(v)
+    getgenv().farmsettings.upgrade = v
+end)
+
+section1:toggle("💵 Cash Drops", true, function(v)
+    getgenv().farmsettings.cashdrop = v
+end)
+
+section1:toggle("🍎 Fruit", true, function(v)
+    getgenv().farmsettings.fruit = v
+end)
+
+--// SETTINGS TAB
+section2:toggle("🚫 Disable 3D", true, function(v)
+    RunService:Set3dRenderingEnabled(not v)
+end)
+
+section2:toggle("🛡 Anti AFK", true, function(v)
+    getgenv().antiafk = v
+end)
+
+--// ANTI AFK
+getgenv().antiafk = true
+plr.Idled:Connect(function()
+    if not getgenv().antiafk then return end
+    local vu = game:GetService("VirtualUser")
+    vu:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    vu:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
